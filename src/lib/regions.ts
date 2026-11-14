@@ -181,6 +181,95 @@ function trace(m: Uint8Array, w: number, h: number): Point[] {
   return pts;
 }
 
+/**
+ * Pull an outline onto the pen stroke.
+ * Coarse AI boxes are resampled along each edge, then every point walks the boundary normal
+ * to the darkest nearby pixel, so the hit target sits on the line that was drawn.
+ */
+export function fitToInk(points: Point[], ink: Float32Array, w: number, h: number): Point[] {
+  if (points.length < 3 || w < 2 || h < 2) return points;
+  const dense = resample(points, Math.max(points.length, 40));
+  const radius = Math.max(8, Math.round(Math.min(w, h) * 0.08));
+  let hits = 0;
+  const moved = dense.map((p, i) => {
+    const prev = dense[(i + dense.length - 1) % dense.length];
+    const next = dense[(i + 1) % dense.length];
+    const len = Math.hypot(next[0] - prev[0], next[1] - prev[1]) || 1;
+    const nx = -(next[1] - prev[1]) / len;
+    const ny = (next[0] - prev[0]) / len;
+    const cx = p[0] * w;
+    const cy = p[1] * h;
+    let best = -1;
+    let bestDist = radius + 1;
+    let bx = cx;
+    let by = cy;
+    for (let s = -radius; s <= radius; s++) {
+      const x = Math.round(cx + nx * s);
+      const y = Math.round(cy + ny * s);
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const v = ink[y * w + x];
+      const dist = Math.abs(s);
+      // Nearest stroke wins, so a key edge can't jump across the gap to its neighbour.
+      if (v >= 18 && (dist < bestDist || (dist === bestDist && v > best))) {
+        best = v;
+        bestDist = dist;
+        bx = x;
+        by = y;
+      }
+    }
+    if (best < 18) {
+      // Corners have a diagonal normal and can miss a straight stroke. Take the nearest ink in a disk.
+      const disk = Math.round(radius * 0.85);
+      let near = disk + 1;
+      const ix = Math.round(cx);
+      const iy = Math.round(cy);
+      for (let dy = -disk; dy <= disk; dy++)
+        for (let dx = -disk; dx <= disk; dx++) {
+          const x = ix + dx, y = iy + dy;
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
+          const dist = Math.hypot(dx, dy);
+          if (dist > disk || ink[y * w + x] < 18 || dist >= near) continue;
+          near = dist;
+          bx = x;
+          by = y;
+          best = ink[y * w + x];
+        }
+    }
+    if (best < 18) return p;
+    hits++;
+    return [(bx + 0.5) / w, (by + 0.5) / h] as Point;
+  });
+  if (hits < Math.max(4, dense.length * 0.3)) return points;
+  const fitted = simplify(moved, 64, 1.25 / Math.max(w, h));
+  return fitted.length >= 3 ? fitted : points;
+}
+
+/** Evenly spaced samples around a closed outline, so a 4-corner box still has points along each edge. */
+function resample(points: Point[], count: number): Point[] {
+  const seg: number[] = [];
+  let total = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i], b = points[(i + 1) % points.length];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    seg.push(len);
+    total += len;
+  }
+  if (total < 1e-6) return points;
+  const out: Point[] = [];
+  for (let k = 0; k < count; k++) {
+    let dist = (k / count) * total;
+    let i = 0;
+    while (i < seg.length - 1 && dist > seg[i]) {
+      dist -= seg[i];
+      i++;
+    }
+    const a = points[i], b = points[(i + 1) % points.length];
+    const t = seg[i] ? dist / seg[i] : 0;
+    out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+  }
+  return out;
+}
+
 /** Douglas–Peucker on a closed outline, loosening until it has at most `max` points. */
 export function simplify(pts: Point[], max: number, minEps = 0): Point[] {
   const dp = (a: number, b: number, eps: number, keep: Set<number>) => {

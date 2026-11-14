@@ -47,7 +47,10 @@ export interface TrackingDiagnostics {
   delegate: "GPU" | "CPU" | null;
 }
 
-const STALE_AFTER_MS = 120;
+/** No new camera frame for this long: release anything the hand was holding. */
+const STALL_MS = 400;
+/** A result older than this is from a hung frame, so it is not used. */
+const MAX_INFERENCE_MS = 500;
 const assetBase = `${import.meta.env.BASE_URL}models`;
 
 /** One fresh camera frame per synchronous inference; no buffered inference queue. */
@@ -79,6 +82,8 @@ export class HandTracker {
   private lastPresentedFrames = 0;
   private lastInferenceAt = 0;
   private lastTimestamp = 0;
+  private onError: ((message: string) => void) | null = null;
+  private errorNotified = false;
 
   async init(): Promise<void> {
     if (this.disposed)
@@ -102,9 +107,10 @@ export class HandTracker {
         runningMode: "VIDEO" as const,
         numHands: 2,
         // Lower than default: steep desk angles make MediaPipe less sure, and dropping a hand mid-press is worse than a stray frame.
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
+        // A laptop webcam looks down at the desk, where MediaPipe is less sure than in a selfie.
+        minHandDetectionConfidence: 0.35,
+        minHandPresenceConfidence: 0.35,
+        minTrackingConfidence: 0.35,
       };
       let model: HandLandmarker;
       try {
@@ -146,7 +152,11 @@ export class HandTracker {
     }
   }
 
-  start(video: HTMLVideoElement, onFrame: (frame: HandFrame) => void): void {
+  start(
+    video: HTMLVideoElement,
+    onFrame: (frame: HandFrame) => void,
+    onError?: (message: string) => void,
+  ): void {
     if (!this.model)
       throw new Error(
         "Call and await HandTracker.init() before starting tracking.",
@@ -154,6 +164,9 @@ export class HandTracker {
     this.stop();
     this.video = video;
     this.onFrame = onFrame;
+    this.onError = onError ?? null;
+    this.errorNotified = false;
+    if (video.paused) void video.play?.().catch(() => {});
     this.running = true;
     this.lastVideoTime = -1;
     this.lastPresentedFrames = 0;
@@ -169,7 +182,7 @@ export class HandTracker {
     video.addEventListener("pause", this.onVideoUnavailable);
     // rVFC stops when the source stalls, so release cannot depend on another frame.
     this.watchdog = setInterval(() => {
-      if (performance.now() - this.diagnostics.lastFrameAt > STALE_AFTER_MS) {
+      if (performance.now() - this.diagnostics.lastFrameAt > STALL_MS) {
         this.release();
         this.diagnostics.status = "paused";
         this.diagnostics.fps = 0;
@@ -196,6 +209,7 @@ export class HandTracker {
     this.release(true);
     this.video = null;
     this.onFrame = null;
+    this.onError = null;
     this.diagnostics.fps = 0;
     this.diagnostics.cameraFps = 0;
     this.diagnostics.status = this.model ? "ready" : "idle";
@@ -224,39 +238,58 @@ export class HandTracker {
     if (this.usesVideoCallback) {
       this.frameHandle = this.video.requestVideoFrameCallback(
         (_now, metadata) => {
+          const presented = metadata.presentedFrames ?? 0;
           const presentedDelta = this.lastPresentedFrames
-            ? metadata.presentedFrames - this.lastPresentedFrames
+            ? presented - this.lastPresentedFrames
             : 1;
           if (this.lastPresentedFrames) {
             this.diagnostics.skippedFrames += Math.max(0, presentedDelta - 1);
           }
-          this.lastPresentedFrames = metadata.presentedFrames;
-          this.process(metadata.mediaTime, presentedDelta);
+          // presentedFrames stays 0 on some camera streams, so a callback is a new frame.
+          const fresh =
+            this.lastPresentedFrames === 0 || presented !== this.lastPresentedFrames;
+          this.lastPresentedFrames = presented;
+          this.process(metadata.mediaTime, presentedDelta, fresh);
         },
       );
     } else {
-      this.frameHandle = requestAnimationFrame(() =>
-        this.process(this.video?.currentTime ?? -1),
-      );
+      this.frameHandle = requestAnimationFrame(() => {
+        const live =
+          typeof MediaStream !== "undefined" &&
+          this.video?.srcObject instanceof MediaStream;
+        const time = this.video?.currentTime ?? -1;
+        this.process(time, 1, live && time === this.lastVideoTime);
+      });
     }
   }
 
-  private process(mediaTime: number, presentedDelta = 1): void {
+  private process(mediaTime: number, presentedDelta = 1, freshFrame = false): void {
     this.frameHandle = null;
     if (!this.running || !this.video || !this.model) return;
     const video = this.video;
-    if (
-      document.hidden ||
-      video.paused ||
-      video.readyState < 2 ||
-      !video.videoWidth ||
-      mediaTime === this.lastVideoTime
-    ) {
+    if (document.hidden || video.readyState < 2 || !video.videoWidth) {
       this.schedule();
       return;
     }
+    // A paused camera never presents another frame, so rVFC would stall the loop.
+    if (video.paused) {
+      void video.play?.().catch(() => {});
+      this.frameHandle = requestAnimationFrame(() =>
+        this.process(video.currentTime, 1, false),
+      );
+      return;
+    }
+    let clock = mediaTime;
+    if (clock === this.lastVideoTime) {
+      if (!freshFrame) {
+        this.schedule();
+        return;
+      }
+      // Some webcams repeat mediaTime while still delivering new frames.
+      clock = this.lastVideoTime + Math.max(presentedDelta, 1) / 60;
+    }
     const previousVideoTime = this.lastVideoTime;
-    this.lastVideoTime = mediaTime;
+    this.lastVideoTime = clock;
     const timestampMs = Math.max(performance.now(), this.lastTimestamp + 0.01);
     this.lastTimestamp = timestampMs;
     try {
@@ -272,15 +305,17 @@ export class HandTracker {
           ? this.diagnostics.fps * 0.8 + fps * 0.2
           : fps;
       }
-      if (previousVideoTime >= 0 && mediaTime > previousVideoTime) {
-        const cameraFps = presentedDelta / (mediaTime - previousVideoTime);
+      if (previousVideoTime >= 0 && clock > previousVideoTime) {
+        const cameraFps = presentedDelta / (clock - previousVideoTime);
         this.diagnostics.cameraFps = this.diagnostics.cameraFps
           ? this.diagnostics.cameraFps * 0.8 + cameraFps * 0.2
           : cameraFps;
       }
       this.lastInferenceAt = timestampMs;
-      // A slow inference must not activate a note using an already stale position.
-      if (this.diagnostics.inferenceMs > STALE_AFTER_MS) {
+      this.diagnostics.error = null;
+      this.errorNotified = false;
+      // A hung frame is too old to place a fingertip. A merely slow one still is.
+      if (this.diagnostics.inferenceMs > MAX_INFERENCE_MS) {
         this.release(true);
         this.diagnostics.status = "paused";
         this.schedule();
@@ -334,12 +369,17 @@ export class HandTracker {
         });
       }
     } catch (error) {
-      this.stop();
-      this.diagnostics.status = "error";
-      this.diagnostics.error =
+      const message =
         error instanceof Error
           ? error.message
           : "Hand tracking stopped unexpectedly.";
+      this.diagnostics.status = "error";
+      this.diagnostics.error = message;
+      if (!this.errorNotified) {
+        this.errorNotified = true;
+        this.onError?.(message);
+      }
+      this.schedule();
       return;
     }
     this.schedule();

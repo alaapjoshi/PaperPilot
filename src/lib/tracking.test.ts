@@ -61,7 +61,7 @@ function frame() {
 }
 
 describe("fresh tracking observations", () => {
-  it("processes each video timestamp once and releases a stalled feed within 150 ms", async () => {
+  it("processes each video timestamp once and releases a stalled feed within 450 ms", async () => {
     const tracker = new HandTracker();
     await tracker.init();
     const video = new FakeVideo();
@@ -77,7 +77,7 @@ describe("fresh tracking observations", () => {
     const [x, y] = onFrame.mock.calls[0][0].fingers[1].tip;
     expect(x).toBeCloseTo(0.5);
     expect(y).toBeCloseTo(0.38);
-    vi.advanceTimersByTime(150);
+    vi.advanceTimersByTime(450);
     expect(onFrame.mock.calls.at(-1)?.[0].tip).toBeNull();
     expect(tracker.diagnostics.status).toBe("paused");
     tracker.dispose();
@@ -104,9 +104,23 @@ describe("fresh tracking observations", () => {
     tracker.dispose();
   });
 
+  it("publishes a moderately slow inference", async () => {
+    model.detectForVideo.mockImplementation(() => {
+      vi.advanceTimersByTime(200);
+      return hand();
+    });
+    const tracker = new HandTracker();
+    await tracker.init();
+    const onFrame = vi.fn();
+    tracker.start(new FakeVideo() as unknown as HTMLVideoElement, onFrame);
+    frame();
+    expect(onFrame.mock.calls.at(-1)?.[0].tip).toEqual([0.5, 0.4]);
+    tracker.dispose();
+  });
+
   it("discards an observation if inference itself made it stale", async () => {
     model.detectForVideo.mockImplementation(() => {
-      vi.advanceTimersByTime(130);
+      vi.advanceTimersByTime(600);
       return hand();
     });
     const tracker = new HandTracker();
@@ -118,6 +132,33 @@ describe("fresh tracking observations", () => {
       onFrame.mock.calls.every(([observation]) => observation.tip === null),
     ).toBe(true);
     expect(tracker.diagnostics.status).toBe("paused");
+    tracker.dispose();
+  });
+
+  it("keeps processing camera frames when the media clock repeats", async () => {
+    const tracker = new HandTracker();
+    await tracker.init();
+    const slot: { fire: ((mediaTime: number, presentedFrames: number) => void) | null } = { fire: null };
+    const video = new FakeVideo() as unknown as HTMLVideoElement;
+    const meta = (mediaTime: number, presentedFrames: number): VideoFrameCallbackMetadata => ({
+      mediaTime,
+      presentedFrames,
+      width: 1280,
+      height: 720,
+      presentationTime: 0,
+      expectedDisplayTime: 0,
+    });
+    video.requestVideoFrameCallback = (next) => {
+      slot.fire = (mediaTime, presentedFrames) => next(0, meta(mediaTime, presentedFrames));
+      return 1;
+    };
+    video.cancelVideoFrameCallback = () => {
+      slot.fire = null;
+    };
+    tracker.start(video, vi.fn());
+    slot.fire?.(0, 1);
+    slot.fire?.(0, 2);
+    expect(model.detectForVideo).toHaveBeenCalledTimes(2);
     tracker.dispose();
   });
 });

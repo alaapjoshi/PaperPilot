@@ -96,6 +96,7 @@ export function aiToControls(shapes: AiShape[], { useLetters = true } = {}): Pap
       polygon: s.polygon,
       action,
       shape: s.shape,
+      label: typeof s.label === "string" ? s.label.trim() : "",
       electrode: null,
     });
   }

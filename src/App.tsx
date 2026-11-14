@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { Camera, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
+import { Box, Camera, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
 import { AudioEngine } from "./lib/audio";
 import { CameraController } from "./lib/camera";
 import { HandTracker, type HandFrame } from "./lib/tracking";
-import { hitControl } from "./lib/geometry";
+import { hitControl, pointInPolygon } from "./lib/geometry";
 import { recognizeControls } from "./lib/recognition";
 import { aiToControls, BASE_OCTAVE, controlName, DRUMS, FX, SHAPE_VOICE, voiceOf, type Voice } from "./lib/aiLayout";
 import { findRegions, inkMap, mergeShapes } from "./lib/regions";
+import { regularize } from "./lib/regularize";
+import { songOrder } from "./lib/song";
+import { DashGame } from "./components/DashGame";
+import { CadStage } from "./components/CadStage";
+import { axisInShape, levelInShape } from "./lib/stick";
 import type { AiShape } from "../server/identify";
 import { TapDetector } from "./lib/tap";
 import { noteName, type ControlAction, type ControlEvent, type PaperControl, type Point } from "./types";
@@ -25,6 +30,20 @@ const VOICES: [Voice, string][] = [
 ];
 const VOICE_NAME = Object.fromEntries(VOICES) as Record<Voice, string>;
 const SHAPE_GLYPH: Record<AiShape["shape"], string> = { rectangle: "▭", circle: "◯", triangle: "△", diamond: "◇", star: "☆", other: "⬠" };
+type CadRole = "joy" | "zoom" | "home";
+const CAD_ROLES: CadRole[] = ["joy", "zoom", "home"];
+const CAD_HELP: Record<CadRole, string> = {
+  joy: "JOY — push inside it to orbit",
+  zoom: "ZOOM — slide up and down",
+  home: "HOME — tap to reset the view",
+};
+function cadRole(label: string): CadRole | null {
+  const t = label.trim().toLowerCase();
+  if (/joy|stick|orbit/.test(t)) return "joy";
+  if (/zoom/.test(t)) return "zoom";
+  if (/home|reset/.test(t)) return "home";
+  return null;
+}
 /** A finger that vanishes for less than this (tracker dropout) keeps its press state. */
 const FINGER_GRACE_MS = 160;
 const label = (a: ControlAction) =>
@@ -105,10 +124,23 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [usage, setUsage] = useState<Usage | null>(null);
   const [trackerReady, setTrackerReady] = useState(false);
+  const [trackError, setTrackError] = useState("");
   const [active, setActive] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<Set<string>>(new Set());
   const [tips, setTips] = useState<Point[]>([]);
-  const [tab, setTab] = useState<"play" | "game">("play");
+  const [tab, setTab] = useState<"play" | "game" | "cad">("play");
+  const [cadBind, setCadBind] = useState<Partial<Record<CadRole, string>>>({});
+  const [cadAssign, setCadAssign] = useState<CadRole | null>(null);
+  const [joy, setJoy] = useState({ x: 0, y: 0 });
+  const [zoomLevel, setZoomLevel] = useState<number | null>(null);
+  const [homeTick, setHomeTick] = useState(0);
+  const [sectionOn, setSectionOn] = useState(false);
+  const [gamePick, setGamePick] = useState<"song" | "dash">("song");
+  const [jumpId, setJumpId] = useState("");
+  const [assignJump, setAssignJump] = useState(false);
+  const [dashOn, setDashOn] = useState(false);
+  const [jumps, setJumps] = useState(0);
+  const [dashScore, setDashScore] = useState<number | null>(null);
   const [fingers, setFingers] = useState<1 | 2 | 10>(1);
   const [game, setGame] = useState({ on: false, target: "", score: 0, combo: 0, left: 0, best: readBest(), pop: "" });
 
@@ -122,8 +154,12 @@ export default function App() {
   // slot (an input, or one fingertip) -> what it is holding
   const held = useRef(new Map<string, { id: string; source: ControlEvent["source"] }>());
   const targetAt = useRef(0);
-  const live = useRef({ controls, aspect, game, tab, fingers });
-  live.current = { controls, aspect, game, tab, fingers };
+  const songIds = useRef<string[]>([]);
+  const songAt = useRef(0);
+  const joyNow = useRef(joy);
+  const zoomNow = useRef(zoomLevel);
+  const live = useRef({ controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign });
+  live.current = { controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign };
 
   useEffect(() => {
     fetch("/api/usage").then((r) => r.json()).then(setUsage).catch(() => setUsage(null));
@@ -135,13 +171,20 @@ export default function App() {
   }, [notice]);
 
   // ---- sound -------------------------------------------------------------
-  const wakeAudio = () => void audio.current.ready().catch((e) => setNotice(e.message));
-
-  const nextTarget = useCallback((avoid: string) => {
-    const ids = live.current.controls.map((c) => c.id).filter((id) => id !== avoid);
-    targetAt.current = performance.now();
-    return ids[Math.floor(Math.random() * ids.length)] ?? avoid;
+  const wakeAudio = useCallback(() => {
+    void audio.current.ready().catch((e) => setNotice(e.message));
   }, []);
+  useEffect(() => {
+    void audio.current.preload();
+    // Capture so sound unlocks on the same click that plays a shape.
+    const unlock = () => wakeAudio();
+    window.addEventListener("pointerdown", unlock, true);
+    window.addEventListener("keydown", unlock, true);
+    return () => {
+      window.removeEventListener("pointerdown", unlock, true);
+      window.removeEventListener("keydown", unlock, true);
+    };
+  }, [wakeAudio]);
 
   const release = useCallback((slot: string) => {
     const h = held.current.get(slot);
@@ -157,19 +200,48 @@ export default function App() {
       const c = live.current.controls.find((x) => x.id === id);
       if (!c) return;
       if (held.current.has(slot)) release(slot);
+      const desk = live.current.tab === "cad" && (id === live.current.cadBind.joy || id === live.current.cadBind.zoom);
       // Sound first, UI after: keeps latency down. Each finger owns its own voice.
-      audio.current.trigger({ controlId: `${id}|${slot}`, phase: "down", value: 1, source, timestampMs: performance.now() }, c, "piano");
+      // The joystick and zoom slider are continuous, so a tap there should not also play a note.
+      if (!desk) audio.current.trigger({ controlId: `${id}|${slot}`, phase: "down", value: 1, source, timestampMs: performance.now() }, c, "piano");
       held.current.set(slot, { id, source });
       setActive(new Set([...held.current.values()].map((x) => x.id)));
-      const g = live.current.game;
-      if (live.current.tab !== "game" || !g.on) return;
+      const now = live.current;
+      if (now.cadAssign) {
+        const role = now.cadAssign;
+        setCadBind((b) => ({ ...b, [role]: id }));
+        setCadAssign(null);
+        setNotice(`${role.toUpperCase()} is this shape.`);
+        return;
+      }
+      if (now.tab === "cad" && id === now.cadBind.home) {
+        setHomeTick((n) => n + 1);
+        return;
+      }
+      if (now.assignJump) {
+        setJumpId(id);
+        setAssignJump(false);
+        setNotice("JUMP is this shape. Start the run when you're ready.");
+        return;
+      }
+      if (now.tab !== "game") return;
+      if (now.gamePick === "dash") {
+        if (now.dashOn && id === now.jumpId) setJumps((n) => n + 1);
+        return;
+      }
+      const g = now.game;
+      if (!g.on) return;
       if (id === g.target) {
+        const ids = songIds.current;
         const fast = performance.now() - targetAt.current < 900;
+        const next = ids.length ? (songAt.current + 1) % ids.length : 0;
+        songAt.current = next;
+        targetAt.current = performance.now();
         const points = 1 + Math.min(g.combo, 9) + (fast ? 2 : 0);
-        setGame((s) => ({ ...s, score: s.score + points, combo: s.combo + 1, target: nextTarget(id), pop: `+${points}${fast ? " fast!" : ""}` }));
+        setGame((s) => ({ ...s, score: s.score + points, combo: s.combo + 1, target: ids[next] ?? "", pop: `+${points}${fast ? " fast!" : ""}` }));
       } else setGame((s) => ({ ...s, combo: 0, pop: "miss" }));
     },
-    [release, nextTarget],
+    [release],
   );
 
   // ---- keyboard ----------------------------------------------------------
@@ -195,13 +267,16 @@ export default function App() {
 
   // ---- camera + hand tracking ---------------------------------------------
   const startCamera = async () => {
-    wakeAudio();
     setBusy("camera");
     try {
       const s = await camera.current.start();
       setStream(s);
       setImage(null);
-      tracker.current.init().then(() => setTrackerReady(true)).catch((e) => setNotice(`Hand tracking off: ${e.message}`));
+      tracker.current.init().then(() => setTrackerReady(true)).catch((e) => {
+        const message = e instanceof Error ? e.message : "Hand tracking could not start.";
+        setTrackError(message);
+        setNotice(`Hand tracking off: ${message}`);
+      });
     } catch (e) {
       // A newer camera request replaced this one (React dev mounts twice): not an error.
       if (e instanceof DOMException && e.name === "AbortError") return;
@@ -218,8 +293,10 @@ export default function App() {
 
   const onHand = useCallback(
     (f: HandFrame) => {
+      setTrackError((prev) => (prev ? "" : prev));
       const { controls, aspect, fingers } = live.current;
       // 1 = first index finger, 2 = both index fingers, 10 = every fingertip.
+      // Dots always show every detected fingertip; the count only chooses which ones play.
       let use = fingers === 10 ? f.fingers : f.fingers.filter((x) => x.id.endsWith(":1"));
       if (fingers === 1) use = use.slice(0, 1);
       const hovered = new Set<string>();
@@ -239,19 +316,43 @@ export default function App() {
           taps.current.delete(id);
           release(`vision:${id}`);
         }
-      setTips(use.map((x) => x.tip));
+      if (live.current.tab === "cad") {
+        const bind = live.current.cadBind;
+        const joyShape = controls.find((c) => c.id === bind.joy);
+        const joyFinger = joyShape && use.find((finger) => pointInPolygon(finger.tip, joyShape.polygon));
+        const nextJoy = joyFinger && joyShape ? axisInShape(joyFinger.tip, joyShape.polygon) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
+        if (Math.hypot(nextJoy.x - joyNow.current.x, nextJoy.y - joyNow.current.y) > 0.03) {
+          joyNow.current = nextJoy;
+          setJoy(nextJoy);
+        }
+        const zoomShape = controls.find((c) => c.id === bind.zoom);
+        const zoomFinger = zoomShape && use.find((finger) => pointInPolygon(finger.tip, zoomShape.polygon));
+        const nextZoom = zoomFinger && zoomShape ? levelInShape(zoomFinger.tip, zoomShape.polygon) : null;
+        if (nextZoom !== zoomNow.current) {
+          zoomNow.current = nextZoom;
+          setZoomLevel(nextZoom);
+        }
+      }
+      setTips(f.fingers.map((x) => x.tip));
       setHover(hovered);
     },
     [press, release],
   );
+  const bindVideo = useCallback((node: HTMLVideoElement | null) => {
+    video.current = node;
+    if (!node) return;
+    if (stream && node.srcObject !== stream) node.srcObject = stream;
+    if (node.paused) void node.play().catch(() => {});
+  }, [stream]);
   useEffect(() => {
     const v = video.current;
-    if (step !== "play" || busy === "scan" || still || !stream || !trackerReady || !v) return;
+    // Track on the live preview too, so fingertips show before the picture is taken.
+    if (busy === "scan" || still || !stream || !trackerReady || !v) return;
     taps.current.clear();
     try {
-      tracker.current.start(v, onHand);
+      tracker.current.start(v, onHand, (message) => setTrackError(message));
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : "Hand tracking unavailable.");
+      setTrackError(e instanceof Error ? e.message : "Hand tracking unavailable.");
     }
     return () => {
       tracker.current.stop();
@@ -260,7 +361,7 @@ export default function App() {
       setTips([]);
       setHover(new Set());
     };
-  }, [step, busy, still, stream, trackerReady, onHand, release]);
+  }, [busy, still, stream, trackerReady, onHand, release]);
 
   // ---- scanning ------------------------------------------------------------
   const scan = async (canvas: HTMLCanvasElement) => {
@@ -288,7 +389,12 @@ export default function App() {
           (sh: AiShape) => Array.isArray(sh?.points) && sh.points.length >= 3 && sh.points.every((p) => Array.isArray(p) && p.every(Number.isFinite)),
         );
         // Use the exact outline the pen drew wherever the drawing confirms the AI's shape.
-        const refined = mergeShapes(ai, findRegions(ink, canvas.width, canvas.height));
+        const traced = mergeShapes(ai, findRegions(ink, canvas.width, canvas.height));
+        // Keep a real square, triangle, or star, and only move those corners onto the drawing.
+        const refined = traced.map((sh) => {
+          const points = regularize(sh.shape, sh.points);
+          return { ...sh, points: points.length >= 3 ? points : sh.points };
+        });
         setShapes(refined);
         found = aiToControls(refined, { useLetters });
       } catch (e) {
@@ -298,6 +404,8 @@ export default function App() {
         setNotice(`AI scan failed (${e instanceof Error ? e.message : "network"}). Used the offline finder.`);
       }
       setControls(found);
+      const jump = found.find((c) => /jump/i.test(c.label ?? ""));
+      if (jump) setJumpId(jump.id);
       if (!found.length) setNotice("No drawn boxes or circles found. Darken the lines and scan again, or try the demo.");
     } finally {
       setBusy("");
@@ -333,34 +441,41 @@ export default function App() {
   };
 
   // ---- game ------------------------------------------------------------------
-  const startGame = () => {
+  const startSong = () => {
     wakeAudio();
-    setGame((s) => ({ ...s, on: true, score: 0, combo: 0, left: GAME_SECONDS, pop: "", target: nextTarget("") }));
+    const ids = songOrder(controls);
+    if (ids.length < 2) return setNotice("Need at least two shapes to play a song.");
+    songIds.current = ids;
+    songAt.current = 0;
+    targetAt.current = performance.now();
+    setDashOn(false);
+    setGame((s) => ({ ...s, on: true, score: 0, combo: 0, left: GAME_SECONDS, pop: "", target: ids[0] }));
   };
   useEffect(() => {
     if (!game.on) return;
     const end = performance.now() + game.left * 1000;
     const t = setInterval(() => {
       const left = Math.max(0, Math.ceil((end - performance.now()) / 1000));
-      setGame((s) => {
-        if (left > 0) {
-          // Too slow: the light jumps elsewhere and your streak resets.
-          if (performance.now() - targetAt.current > TARGET_MS)
-            return { ...s, left, combo: 0, target: nextTarget(s.target), pop: "too slow" };
-          return s.left === left ? s : { ...s, left };
-        }
-        const best = Math.max(s.best, s.score);
-        try {
-          localStorage.setItem("paperpilot.best", String(best));
-        } catch {
-          /* best score is a nicety */
-        }
-        return { ...s, on: false, left: 0, target: "", best, pop: "" };
-      });
+      if (left <= 0) {
+        setGame((s) => {
+          if (!s.on) return s;
+          const best = Math.max(s.best, s.score);
+          try {
+            localStorage.setItem("paperpilot.best", String(best));
+          } catch {
+            /* best score is a nicety */
+          }
+          return { ...s, on: false, left: 0, target: "", best, pop: "" };
+        });
+        return;
+      }
+      if (performance.now() - targetAt.current > TARGET_MS) {
+        targetAt.current = performance.now();
+        setGame((s) => (s.on ? { ...s, left, combo: 0, pop: "too slow" } : s));
+      } else setGame((s) => (s.on && s.left !== left ? { ...s, left } : s));
     }, 100);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- restart only when a round starts/stops
-  }, [game.on, nextTarget]);
+  }, [game.on]);
   useEffect(() => {
     if (!game.pop) return;
     const t = setTimeout(() => setGame((s) => ({ ...s, pop: "" })), 700);
@@ -399,14 +514,34 @@ export default function App() {
     if (shapes.length) setControls(aiToControls(shapes, { useLetters: on }));
   };
   useEffect(() => audio.current.warm(controls), [controls]);
+  useEffect(() => {
+    if (jumpId && !controls.some((c) => c.id === jumpId)) setJumpId("");
+  }, [controls, jumpId]);
+  useEffect(() => {
+    setCadBind((prev) => {
+      const next = { ...prev };
+      for (const role of CAD_ROLES) {
+        if (next[role] && !controls.some((c) => c.id === next[role])) delete next[role];
+        const found = controls.find((c) => cadRole(c.label ?? "") === role);
+        if (found) next[role] = found.id;
+      }
+      return next;
+    });
+  }, [controls]);
 
   const restart = () => {
     setGame((s) => ({ ...s, on: false, target: "" }));
+    setDashOn(false);
+    setAssignJump(false);
     setTab("play");
     setControls([]);
     setShapes([]);
     setImage(null);
     setStep("scan");
+  };
+  const stopGames = () => {
+    setGame((s) => ({ ...s, on: false, target: "" }));
+    setDashOn(false);
   };
 
   // ---- render ------------------------------------------------------------------
@@ -423,10 +558,7 @@ export default function App() {
     >
       {stream && (
         <video
-          ref={(v) => {
-            video.current = v;
-            if (v && v.srcObject !== stream) v.srcObject = stream;
-          }}
+          ref={bindVideo}
           onLoadedMetadata={(e) => step === "scan" && setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight)}
           autoPlay
           playsInline
@@ -447,7 +579,7 @@ export default function App() {
             <polygon
               key={c.id}
               points={c.polygon.map((p) => p.join(",")).join(" ")}
-              className={[`v-${voiceOf(c)}`, active.has(c.id) && "on", game.target === c.id && "target", hover.has(c.id) && "hover"]
+              className={[`v-${voiceOf(c)}`, active.has(c.id) && "on", ((game.on && game.target === c.id) || (gamePick === "dash" && c.id === jumpId) || (tab === "cad" && Object.values(cadBind).includes(c.id))) && "target", hover.has(c.id) && "hover"]
                 .filter(Boolean)
                 .join(" ")}
               vectorEffect="non-scaling-stroke"
@@ -464,7 +596,7 @@ export default function App() {
               className={`tag v-${voiceOf(c)} ${active.has(c.id) ? "on" : ""}`}
               style={{ left: `${x * 100}%`, top: `${y * 100}%` }}
             >
-              {label(c.action)}
+              {tab === "cad" ? (CAD_ROLES.find((role) => cadBind[role] === c.id)?.toUpperCase() ?? label(c.action)) : label(c.action)}
               {KEYS[i] && <kbd>{KEYS[i].toUpperCase()}</kbd>}
             </span>
           );
@@ -495,16 +627,17 @@ export default function App() {
         </button>
         {step === "play" && !scanning && controls.length > 0 && (
           <nav className="tabs">
-            {(["play", "game"] as const).map((t) => (
+            {(["play", "game", "cad"] as const).map((t) => (
               <button
                 key={t}
                 className={tab === t ? "on" : ""}
                 onClick={() => {
-                  setGame((s) => ({ ...s, on: false, target: "" }));
+                  stopGames();
+                  setCadAssign(null);
                   setTab(t);
                 }}
               >
-                {t === "play" ? <Music size={16} /> : <Trophy size={16} />} {t === "play" ? "Play" : "Game"}
+                {t === "play" ? <Music size={16} /> : t === "game" ? <Trophy size={16} /> : <Box size={16} />} {t === "play" ? "Play" : t === "game" ? "Game" : "CAD"}
               </button>
             ))}
           </nav>
@@ -518,14 +651,22 @@ export default function App() {
         </div>
       </header>
 
-      <main>
+      <main className={tab === "cad" && step === "play" && !scanning ? "split-cad" : ""}>
         <section className="stage">{paper}</section>
+        {tab === "cad" && step === "play" && !scanning && (
+          <div className="cad-pane">
+            <CadStage joy={joy} zoom={zoomLevel} homeTick={homeTick} section={sectionOn} />
+          </div>
+        )}
 
         <aside>
           {step === "scan" && (
             <>
               <h1>Take a picture of your drawing</h1>
               <p className="lead">Each shape you draw is an instrument. Write a note (C, F#, Bb) inside a shape to pick its exact note.</p>
+              {stream && !trackerReady && !trackError && <p className="hint">Loading hand tracking…</p>}
+              {stream && trackerReady && !trackError && <p className="hint">A yellow dot follows each fingertip. Hold your hand over the page.</p>}
+              {trackError && <p className="hint">{trackError}</p>}
               <ul className="legend">
                 {(Object.keys(SHAPE_VOICE) as AiShape["shape"][]).map((sh) => (
                   <li key={sh} className={`v-${SHAPE_VOICE[sh]}`}>
@@ -555,23 +696,66 @@ export default function App() {
 
           {step === "play" && !scanning && tab === "game" && (
             <>
-              <h2>Catch the light</h2>
-              {game.on ? (
-                <div className="scoreboard">
-                  <div><small>Score</small><b>{game.score}</b></div>
-                  <div><small>Streak</small><b>×{game.combo}</b></div>
-                  <div><small>Time</small><b>{game.left}s</b></div>
-                </div>
-              ) : (
+              <div className="choice" role="tablist" aria-label="Games">
+                <button className={gamePick === "song" ? "on" : ""} onClick={() => { stopGames(); setGamePick("song"); }}>
+                  Song <small>Light-up notes</small>
+                </button>
+                <button className={gamePick === "dash" ? "on" : ""} onClick={() => { stopGames(); setGamePick("dash"); }}>
+                  Dash <small>One-button run</small>
+                </button>
+              </div>
+              {gamePick === "song" && (
                 <>
-                  <p className="lead">A shape glows. Hit it before it jumps away. Streaks and fast hits score more. {GAME_SECONDS} seconds.</p>
-                  <div className="scoreboard two">
-                    <div><small>Best</small><b>{game.best}</b></div>
-                    <div><small>Last round</small><b>{game.score}</b></div>
-                  </div>
-                  <button className="primary big" onClick={startGame} disabled={controls.length < 2}>
-                    <Play size={20} /> Start
-                  </button>
+                  <h2>Play the glowing note</h2>
+                  {game.on ? (
+                    <div className="scoreboard">
+                      <div><small>Score</small><b>{game.score}</b></div>
+                      <div><small>Streak</small><b>×{game.combo}</b></div>
+                      <div><small>Time</small><b>{game.left}s</b></div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="lead">Twinkle, Twinkle. The next note lights up on the paper. Hit that shape. Fast hits score more. {GAME_SECONDS} seconds.</p>
+                      <div className="scoreboard two">
+                        <div><small>Best</small><b>{game.best}</b></div>
+                        <div><small>Last round</small><b>{game.score}</b></div>
+                      </div>
+                      <button className="primary big" onClick={startSong} disabled={controls.length < 2}>
+                        <Play size={20} /> Start song
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+              {gamePick === "dash" && (
+                <>
+                  <h2>Paper Dash</h2>
+                  <p className="lead">Draw a shape and write JUMP inside it, then take a picture. That shape is the jump button. The cube runs until it hits a spike.</p>
+                  <ol className="steps-list">
+                    <li className={jumpId ? "done" : ""}>JUMP {jumpId ? "registered" : "not found yet"}</li>
+                  </ol>
+                  {!jumpId && (
+                    <button className={assignJump ? "primary" : ""} onClick={() => setAssignJump(true)}>
+                      {assignJump ? "Tap the JUMP shape…" : "Tap a shape to register JUMP"}
+                    </button>
+                  )}
+                  {jumpId && !dashOn && (
+                    <button onClick={() => setAssignJump(true)}>Use a different shape</button>
+                  )}
+                  <DashGame
+                    running={dashOn}
+                    jumps={jumps}
+                    onFinish={(score) => {
+                      setDashOn(false);
+                      setDashScore(score);
+                    }}
+                  />
+                  {dashScore !== null && !dashOn && <p className="hint">Last run: {dashScore}</p>}
+                  {!dashOn && (
+                    <button className="primary big" onClick={() => { wakeAudio(); setJumps(0); setDashOn(true); }} disabled={!jumpId}>
+                      <Play size={20} /> Start run
+                    </button>
+                  )}
                 </>
               )}
               {showVideo && (
@@ -587,6 +771,26 @@ export default function App() {
             </>
           )}
 
+          {step === "play" && !scanning && tab === "cad" && (
+            <>
+              <h2>Desk controls</h2>
+              <p className="lead">Extra hands for a CAD program. Draw three shapes and write JOY, ZOOM, and HOME. The joystick orbits the bracket. Slide ZOOM. Tap HOME to reset. Arrow keys do the same orbit.</p>
+              <ol className="steps-list">
+                {CAD_ROLES.map((role) => (
+                  <li key={role} className={cadBind[role] ? "done" : ""}>{CAD_HELP[role]}{cadBind[role] ? " · ready" : ""}</li>
+                ))}
+              </ol>
+              {CAD_ROLES.map((role) => (
+                <button key={role} className={cadAssign === role ? "primary" : ""} onClick={() => setCadAssign(role)}>
+                  {cadAssign === role ? `Tap the ${role.toUpperCase()} shape…` : cadBind[role] ? `Reassign ${role.toUpperCase()}` : `Tap a shape for ${role.toUpperCase()}`}
+                </button>
+              ))}
+              <button className={sectionOn ? "primary" : ""} onClick={() => setSectionOn((v) => !v)}>
+                {sectionOn ? "Section on" : "Section view"}
+              </button>
+            </>
+          )}
+
           {step === "play" && !scanning && tab === "play" && (
             <>
               <h2>{controls.length ? "Play" : "No shapes found"}</h2>
@@ -597,7 +801,8 @@ export default function App() {
                     ? "Tap a shape on your paper, or click it on screen. Yellow dots are your fingertips."
                     : "Click a shape or use the keys shown."}
               </p>
-              {showVideo && !trackerReady && <p className="hint">Loading hand tracking…</p>}
+              {showVideo && !trackerReady && !trackError && <p className="hint">Loading hand tracking…</p>}
+              {showVideo && trackError && <p className="hint">{trackError}</p>}
               {showVideo && (
                 <div className="fingers" role="radiogroup" aria-label="Fingers that play">
                   <span>Fingers</span>
@@ -660,6 +865,10 @@ export default function App() {
           )}
         </aside>
       </main>
+      <footer>
+        <span className="brand">PaperPilot</span>
+        <span>Runs in your browser</span>
+      </footer>
       {notice && (
         <div className="toast" role="status" onClick={() => setNotice("")}>
           {notice}

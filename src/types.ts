@@ -19,6 +19,8 @@ export interface PaperControl {
   electrode?: number | null;
   /** Drawn shape the AI saw (rectangle, circle, triangle…), for display. */
   shape?: string;
+  /** Handwriting inside the shape, kept so a game can register "JUMP". */
+  label?: string;
 }
 export interface PaperLayout {
   version: 1;

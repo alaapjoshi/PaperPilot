@@ -93,6 +93,7 @@ interface Voice {
   started: number;
   state: "held" | "sustained" | "released";
   oneShot: boolean;
+  level: number;
 }
 
 /** One local audio graph. Call ready() directly inside a user gesture. */
@@ -112,6 +113,8 @@ export class AudioEngine {
   private wet!: GainNode;
   private ownership = new VoiceOwnership();
   private voices = new Map<number, Voice>();
+  /** Short noise used until a drum sample has decoded. */
+  private tap: AudioBuffer | null = null;
   private nextId = 1;
   private volume = 0.72;
   private releaseSeconds = 0.22;
@@ -119,13 +122,65 @@ export class AudioEngine {
   private effect = 0.12;
   private preset: SoundPreset = "piano";
   private assetError = "";
+  private files = new Map<string, ArrayBuffer>();
+  private preloadPromise: Promise<void> | null = null;
+  /** Downs that arrived before the browser allowed playback. */
+  private pending = new Map<string, { event: ControlEvent; control: PaperControl; mode: Mode; octave: number; release: boolean }>();
+
+  /** Fetch samples without creating an AudioContext, so autoplay rules are not tripped on page load. */
+  preload(): Promise<void> {
+    if (!this.preloadPromise) this.preloadPromise = this.fetchAll();
+    return this.preloadPromise;
+  }
 
   async ready(): Promise<void> {
+    const preload = this.preload();
+    // Create and resume synchronously, before any await, so this still counts as the click/key.
     if (!this.context) this.initialize();
-    // Resume synchronously within the original user gesture, before any fetch.
-    const resumed = this.context!.resume();
-    if (!this.loading) this.loading = this.loadSamples();
-    await Promise.all([resumed, this.loading]);
+    const resumed = this.context!.state === "running" ? Promise.resolve() : this.context!.resume();
+    await Promise.all([preload, resumed]);
+    if (!this.loaded) {
+      if (!this.loading) this.loading = this.loadSamples();
+      await this.loading;
+    }
+    this.flush();
+  }
+
+  private canPlay() {
+    // Samples can still be decoding. A running context can already make a tone.
+    return this.context?.state === "running";
+  }
+
+  /** True while the current event is still a browser user gesture. */
+  private gesture() {
+    return navigator.userActivation ? navigator.userActivation.isActive : true;
+  }
+
+  private async fetchAll() {
+    const paths = [
+      ...PIANO_NOTES.map((note) => `piano/${note}.wav`),
+      ...[...DRUM_SOUNDS, ...BOARD_SOUNDS].map((sound) => `oneshots/${sound}.wav`),
+    ];
+    await Promise.all(
+      paths.map(async (path) => {
+        try {
+          const response = await fetch(`/audio/${path}`);
+          if (response.ok) this.files.set(path, await response.arrayBuffer());
+        } catch {
+          /* loadSamples reports a missing bank */
+        }
+      }),
+    );
+  }
+
+  private flush() {
+    if (!this.canPlay()) return;
+    for (const item of [...this.pending.values()]) {
+      this.pending.delete(ownerKey(item.event.source, item.event.controlId));
+      this.trigger(item.event, item.control, item.mode, item.octave);
+      if (item.release)
+        this.trigger({ ...item.event, phase: "up" }, item.control, item.mode, item.octave);
+    }
   }
 
   private initialize() {
@@ -149,6 +204,10 @@ export class AudioEngine {
     this.compressor.connect(this.master);
     this.master.connect(this.analyser);
     this.analyser.connect(context.destination);
+    const tap = context.createBuffer(1, Math.floor(context.sampleRate * 0.12), context.sampleRate);
+    const noise = tap.getChannelData(0);
+    for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() * 2 - 1) * Math.exp(-i / (context.sampleRate * 0.02));
+    this.tap = tap;
     this.room = context.createBuffer(
       2,
       Math.ceil(context.sampleRate * 0.48),
@@ -187,9 +246,10 @@ export class AudioEngine {
 
   private async loadSamples() {
     const decode = async (path: string) => {
-      const response = await fetch(`/audio/${path}`);
-      if (!response.ok) throw new Error(`Missing local audio: ${path}`);
-      return this.context!.decodeAudioData(await response.arrayBuffer());
+      const raw = this.files.get(path);
+      if (!raw) throw new Error(`Missing local audio: ${path}`);
+      // decodeAudioData detaches the buffer it is given.
+      return this.context!.decodeAudioData(raw.slice(0));
     };
     const jobs = [
       ...PIANO_NOTES.map(async (note, index) =>
@@ -218,6 +278,35 @@ export class AudioEngine {
     octave = 0,
   ): void {
     const owner = ownerKey(event.source, event.controlId);
+    if (!this.context && this.gesture()) {
+      try {
+        this.initialize();
+      } catch {
+        /* the click handler surfaces the error */
+      }
+    }
+    if (this.context && this.context.state !== "running" && this.gesture()) {
+      const context = this.context;
+      void context.resume().then(() => {
+        if (context.state === "running") this.flush();
+      });
+    }
+    if (!this.loaded) void this.ready().catch(() => {});
+    if (!this.canPlay()) {
+      if (event.phase === "down")
+        this.pending.set(owner, {
+          event,
+          control,
+          mode,
+          octave,
+          release: this.pending.get(owner)?.release ?? false,
+        });
+      else if (event.phase === "up") {
+        const queued = this.pending.get(owner);
+        if (queued) queued.release = true;
+      }
+      return;
+    }
     if (event.phase === "up") {
       const pedal = this.sustain && (mode === "piano" || mode === "chords");
       for (const id of this.ownership.release(owner, pedal)) {
@@ -265,7 +354,8 @@ export class AudioEngine {
       };
       const sound =
         this.sounds.get(alias[requested] ?? requested) ??
-        this.sounds.get(fallback);
+        this.sounds.get(fallback) ??
+        this.tap;
       if (sound) created.push(this.playBuffer(sound, 1, 0.65, true));
     } else {
       const mapped = control.action.type === "note" ? control.action.midi : 60;
@@ -368,8 +458,8 @@ export class AudioEngine {
     }
     const context = this.context!;
     const gain = context.createGain();
-    gain.gain.setValueAtTime(0, context.currentTime);
-    gain.gain.linearRampToValueAtTime(level, context.currentTime + 0.003);
+    // Full level immediately. A ramp from silence gets wiped when a click releases in the same instant.
+    gain.gain.setValueAtTime(level, context.currentTime);
     source.connect(gain);
     const id = this.nextId++;
     const voice: Voice = {
@@ -379,6 +469,7 @@ export class AudioEngine {
       started: context.currentTime,
       state: "held",
       oneShot,
+      level,
     };
     if (this.preset === "felt" && !oneShot) {
       voice.filter = context.createBiquadFilter();
@@ -396,10 +487,14 @@ export class AudioEngine {
   private releaseVoice(voice: Voice, seconds: number) {
     if (voice.state === "released") return;
     voice.state = "released";
-    const time = this.context!.currentTime;
-    voice.gain.gain.cancelAndHoldAtTime(time);
-    voice.gain.gain.linearRampToValueAtTime(0, time + seconds);
-    voice.source.stop(time + seconds + 0.005);
+    const now = this.context!.currentTime;
+    const hold = Math.max(now + 0.03, voice.started + 0.16);
+    const gain = voice.gain.gain;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(voice.level, now);
+    gain.setValueAtTime(voice.level, hold);
+    gain.linearRampToValueAtTime(0, hold + seconds);
+    voice.source.stop(hold + seconds + 0.02);
   }
 
   private cleanup(id: number) {

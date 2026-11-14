@@ -39,6 +39,7 @@ const inputs = [
   "tsconfig.json",
   "vite.config.ts",
   "server",
+  ".env.local",
 ];
 if (!existsSync(join(project, "node_modules")))
   throw new Error("Dependencies are missing. Run npm install first.");
