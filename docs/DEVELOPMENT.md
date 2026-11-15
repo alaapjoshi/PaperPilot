@@ -18,6 +18,6 @@ All production assets are included under `public/`. No asset-generation step is 
 
 Control polygons live in normalized paper coordinates. The renderer and hit tester share those polygons and the same homography. Raw camera coordinates are never inferred from CSS screen pixels. The camera remains unmirrored.
 
-Web Audio dispatch runs before React visual updates. Model inference uses fresh video frames only, with no pending inference queue. Pinch input has separate press/release thresholds and locks a control until rearmed. Stale/no-hand observations release vision-owned audio; MIDI loss releases MIDI-owned audio. Window blur, hidden pages, mode changes, layout editing, and Stop all clear the session.
+Web Audio starts each sound before React updates the screen. Hand tracking only ever processes the newest camera frame, with no queue. If a hand drops out of tracking or the result is stale, its notes are released. Each input (each fingertip, the mouse, the keyboard) owns its own notes, so releasing one never cuts off another.
 
 The hardware benchmark is intentionally not simulated. Browser-reported base/output latency and model inference duration appear separately from the unmeasured physical-to-sound field.

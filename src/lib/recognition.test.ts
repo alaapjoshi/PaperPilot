@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { NATURAL_NOTES } from "../types";
-import { controlsOverlap } from "./geometry";
 import { recognizeControls } from "./recognition";
 
 function page(width = 480, height = 340, shade = 255): ImageData {
@@ -53,7 +52,9 @@ describe("setup-only rectangle recognition", () => {
       NATURAL_NOTES.map((midi) => ({ type: "note", midi })),
     );
     expect(controls.every((control) => control.kind === "key")).toBe(true);
-    expect(controlsOverlap(controls)).toEqual([]);
+    // Keys sit side by side: each one ends before the next begins.
+    const xs = controls.map((c) => c.polygon.map((p) => p[0]));
+    for (let i = 1; i < xs.length; i++) expect(Math.max(...xs[i - 1])).toBeLessThanOrEqual(Math.min(...xs[i]) + 1e-6);
     expect(controls[0].polygon[0][0]).toBeCloseTo(40 / 480, 2);
     expect(controls[7].polygon[2][0]).toBeCloseTo(440 / 480, 2);
   });

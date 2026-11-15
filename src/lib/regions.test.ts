@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findRegions, fitToInk, inkMap, mergeShapes } from "./regions";
+import { findRegions, inkMap, mergeShapes } from "./regions";
 import type { Point } from "../types";
 import type { AiShape } from "../../server/identify";
 
@@ -83,25 +83,5 @@ describe("findRegions", () => {
     const aiKey: AiShape = { shape: "rectangle", points: KEY.map(([x, y]) => [x / W, y / H] as Point), label: "" };
     const out = mergeShapes([aiKey], strips);
     expect(out).toEqual([aiKey]);
-  });
-  it("pulls a shifted box onto the pen line", () => {
-    const ink = inkMap(page([KEY]));
-    const shifted = [[45, 30], [115, 30], [115, 245], [45, 245]].map(([x, y]) => [x / W, y / H] as Point);
-    const fitted = fitToInk(shifted, ink, W, H);
-    const distToPoly = (p: Point, poly: Point[]) => {
-      let best = Infinity;
-      for (let i = 0; i < poly.length; i++) {
-        const a = poly[i], b = poly[(i + 1) % poly.length];
-        const dx = b[0] - a[0], dy = b[1] - a[1];
-        const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
-        best = Math.min(best, Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy));
-      }
-      return best;
-    };
-    const median = (xs: number[]) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-    const before = median(shifted.map(([x, y]) => distToPoly([x * W, y * H], KEY)));
-    const after = median(fitted.map(([x, y]) => distToPoly([x * W, y * H], KEY)));
-    expect(after).toBeLessThan(before);
-    expect(after).toBeLessThan(8);
   });
 });

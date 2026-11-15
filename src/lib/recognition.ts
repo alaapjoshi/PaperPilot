@@ -1,94 +1,9 @@
 import {
   NATURAL_NOTES,
   noteName,
-  type Corners,
   type PaperControl,
   type Point,
 } from "../types";
-import { computeHomography, transformPoint, validateCorners } from "./geometry";
-
-const UNIT_CORNERS: Corners = [
-  [0, 0],
-  [1, 0],
-  [1, 1],
-  [0, 1],
-];
-
-/** Capture once during setup. All sampling and detection happens in paper coordinates. */
-export function rectifyImage(
-  source: HTMLCanvasElement | HTMLVideoElement,
-  corners: Corners,
-  width = 720,
-  height = 510,
-): HTMLCanvasElement {
-  if (!validateCorners(corners))
-    throw new Error("Choose four convex paper corners in clockwise order.");
-  const sourceWidth = "videoWidth" in source ? source.videoWidth : source.width;
-  const sourceHeight =
-    "videoHeight" in source ? source.videoHeight : source.height;
-  if (sourceWidth <= 0 || sourceHeight <= 0)
-    throw new Error("The camera has no image yet.");
-  if (![width, height].every((value) => Number.isFinite(value) && value >= 2))
-    throw new Error("Choose a valid capture size.");
-  const capture = document.createElement("canvas");
-  const scale = Math.min(1, 1280 / Math.max(sourceWidth, sourceHeight));
-  capture.width = Math.max(2, Math.round(sourceWidth * scale));
-  capture.height = Math.max(2, Math.round(sourceHeight * scale));
-  const captureContext = capture.getContext("2d", { willReadFrequently: true });
-  if (!captureContext)
-    throw new Error("Canvas capture is unavailable in this browser.");
-  captureContext.drawImage(source, 0, 0, capture.width, capture.height);
-  const input = captureContext.getImageData(
-    0,
-    0,
-    capture.width,
-    capture.height,
-  );
-  const canvas = document.createElement("canvas");
-  const outputScale = Math.min(1, 1024 / Math.max(width, height));
-  canvas.width = Math.round(width * outputScale);
-  canvas.height = Math.round(height * outputScale);
-  const context = canvas.getContext("2d");
-  if (!context)
-    throw new Error("Canvas capture is unavailable in this browser.");
-  const output = context.createImageData(canvas.width, canvas.height);
-  const matrix = computeHomography(UNIT_CORNERS, corners);
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const projected = transformPoint(matrix, [
-        x / (canvas.width - 1),
-        y / (canvas.height - 1),
-      ]);
-      const sx = Math.max(
-        0,
-        Math.min(capture.width - 1, projected[0] * (capture.width - 1)),
-      );
-      const sy = Math.max(
-        0,
-        Math.min(capture.height - 1, projected[1] * (capture.height - 1)),
-      );
-      const x0 = Math.floor(sx);
-      const y0 = Math.floor(sy);
-      const x1 = Math.min(x0 + 1, capture.width - 1);
-      const y1 = Math.min(y0 + 1, capture.height - 1);
-      const dx = sx - x0;
-      const dy = sy - y0;
-      const destination = (y * canvas.width + x) * 4;
-      for (let channel = 0; channel < 3; channel++) {
-        const top =
-          input.data[(y0 * capture.width + x0) * 4 + channel] * (1 - dx) +
-          input.data[(y0 * capture.width + x1) * 4 + channel] * dx;
-        const bottom =
-          input.data[(y1 * capture.width + x0) * 4 + channel] * (1 - dx) +
-          input.data[(y1 * capture.width + x1) * 4 + channel] * dx;
-        output.data[destination + channel] = top * (1 - dy) + bottom * dy;
-      }
-      output.data[destination + 3] = 255;
-    }
-  }
-  context.putImageData(output, 0, 0);
-  return canvas;
-}
 
 interface Region {
   left: number;

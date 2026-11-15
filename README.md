@@ -20,7 +20,7 @@ Built with Aryan Acharya at **Princeton Hacks 2026**. Musical instruments and co
 ## Gallery
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/gallery-1.png" alt="A drawing of piano keys, drum circles and triangles, labeled with notes in the app while one key lights up" /><br /><sub>Gemini labels every drawn shape; the note under your finger lights up.</sub></td>
+    <td width="50%"><img src="docs/images/gallery-demo.gif" alt="Animation: a drawing on paper is scanned by Gemini, every shape is labeled as an instrument, then keys and drums light up as they are tapped" /><br /><sub>Draw it, snap it, play it: Gemini labels the drawing, then every shape plays.</sub></td>
     <td width="50%"><img src="docs/images/gallery-2.png" alt="The instrument editor listing each shape with an instrument and note menu" /><br /><sub>Every shape is an instrument, and any of them can be changed.</sub></td>
   </tr>
   <tr>
@@ -77,6 +77,8 @@ npm run preview   # serve the build locally
 ~~~
 
 ## Project Structure
+![Each folder in the repo and what it does](docs/images/structure.png)
+
 ~~~text
 paperpilot/
   src/App.tsx           # the app: picture, play, game and CAD tabs, input routing

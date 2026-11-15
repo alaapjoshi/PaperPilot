@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="brand.css">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --w: 1600px; --h: 1000px; }
+  .page { padding: 64px; display: flex; flex-direction: column; gap: 36px; height: 100%; }
+  h1 { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; }
+  .sub { font-size: 24px; color: var(--muted); margin-top: 10px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .card { background: var(--card); border-radius: 16px; padding: 24px 28px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.05); }
+  .name { font-family: "JetBrains Mono", monospace; font-size: 24px; font-weight: 700; color: var(--accent); }
+  .what { font-size: 21px; line-height: 1.4; }
+  .files { font-family: "JetBrains Mono", monospace; font-size: 15px; color: var(--muted); }
+  .wide { grid-column: 1 / -1; }
+</style></head>
+<body><div class="page">
+  <div><h1>What's in the repo</h1><p class="sub">Every folder, and why it's there</p></div>
+  <div class="grid">
+    <div class="card"><p class="name">src/App.tsx</p><p class="what">The whole app: take a picture, then the Play, Game, CAD and Hands tabs.</p><p class="files">one screen, all input routing</p></div>
+    <div class="card"><p class="name">src/lib/</p><p class="what">The engine: tap detection, outline tracing, hand tracking, gestures, audio and synthesized instruments.</p><p class="files">tap · regions · tracking · gesture · audio · synth (+ tests)</p></div>
+    <div class="card"><p class="name">src/components/</p><p class="what">The 3D views and the game: the CAD bracket, the hand-controlled cube and Paper Dash.</p><p class="files">CadStage · CubeStage · DashGame</p></div>
+    <div class="card"><p class="name">server/</p><p class="what">The Gemini scan route. Keeps the API key off the browser and tracks how much each scan costs.</p><p class="files">identify.ts → POST /api/identify</p></div>
+    <div class="card"><p class="name">public/</p><p class="what">Bundled hand-tracking model and piano and drum samples, so it plays offline.</p><p class="files">models/ · audio/</p></div>
+    <div class="card"><p class="name">docs/</p><p class="what">Dev notes, audio licenses, a sample drawing to try, and these README images.</p><p class="files">DEVELOPMENT.md · sample/ · images/</p></div>
+    <div class="card wide"><p class="name">scripts/run.mjs</p><p class="what">One launcher behind npm run dev, build, preview and test.</p></div>
+  </div>
+</div></body></html>
