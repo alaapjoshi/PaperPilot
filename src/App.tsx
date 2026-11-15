@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { Box, Camera, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
+import { Box, Camera, Hand, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
 import { AudioEngine } from "./lib/audio";
 import { CameraController } from "./lib/camera";
 import { HandTracker, type HandFrame } from "./lib/tracking";
@@ -11,6 +11,8 @@ import { regularize } from "./lib/regularize";
 import { songOrder } from "./lib/song";
 import { DashGame } from "./components/DashGame";
 import { CadStage } from "./components/CadStage";
+import { CubeStage } from "./components/CubeStage";
+import { CubeGestures, HOME_POSE, type CubePose, type GestureMode } from "./lib/gesture";
 import { axisInShape, levelInShape } from "./lib/stick";
 import type { AiShape } from "../server/identify";
 import { TapDetector } from "./lib/tap";
@@ -128,7 +130,12 @@ export default function App() {
   const [active, setActive] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<Set<string>>(new Set());
   const [tips, setTips] = useState<Point[]>([]);
-  const [tab, setTab] = useState<"play" | "game" | "cad">("play");
+  const [tab, setTab] = useState<"play" | "game" | "cad" | "hands">("play");
+  // Hands tab: a floating cube driven by pinch gestures, no paper needed.
+  const cubeGestures = useRef(new CubeGestures());
+  const cubePose = useRef<CubePose>({ ...HOME_POSE });
+  const cubeModeNow = useRef<GestureMode>("idle");
+  const [cubeMode, setCubeMode] = useState<GestureMode>("idle");
   const [cadBind, setCadBind] = useState<Partial<Record<CadRole, string>>>({});
   const [cadAssign, setCadAssign] = useState<CadRole | null>(null);
   const [joy, setJoy] = useState({ x: 0, y: 0 });
@@ -294,6 +301,20 @@ export default function App() {
   const onHand = useCallback(
     (f: HandFrame) => {
       setTrackError((prev) => (prev ? "" : prev));
+      if (live.current.tab === "hands") {
+        const v = video.current;
+        const ar = v?.videoWidth ? v.videoWidth / v.videoHeight : live.current.aspect;
+        const g = cubeGestures.current;
+        // Mirror like a selfie view, so the cube follows your hand the way you expect.
+        const mirrored = f.fingers.map((x) => ({ ...x, tip: [1 - x.tip[0], x.tip[1]] as Point, raw: [1 - x.raw[0], x.raw[1]] as Point }));
+        cubePose.current = { ...g.update(mirrored, f.timestampMs, ar) };
+        if (g.mode !== cubeModeNow.current) {
+          cubeModeNow.current = g.mode;
+          setCubeMode(g.mode);
+        }
+        setTips(g.points); // only the thumb and index tips this mode uses
+        return;
+      }
       const { controls, aspect, fingers } = live.current;
       // 1 = first index finger, 2 = both index fingers, 10 = every fingertip.
       // Dots always show every detected fingertip; the count only chooses which ones play.
@@ -347,7 +368,7 @@ export default function App() {
   useEffect(() => {
     const v = video.current;
     // Track on the live preview too, so fingertips show before the picture is taken.
-    if (busy === "scan" || still || !stream || !trackerReady || !v) return;
+    if (busy === "scan" || (still && tab !== "hands") || !stream || !trackerReady || !v) return;
     taps.current.clear();
     try {
       tracker.current.start(v, onHand, (message) => setTrackError(message));
@@ -361,7 +382,7 @@ export default function App() {
       setTips([]);
       setHover(new Set());
     };
-  }, [busy, still, stream, trackerReady, onHand, release]);
+  }, [busy, still, tab, stream, trackerReady, onHand, release]);
 
   // ---- scanning ------------------------------------------------------------
   const scan = async (canvas: HTMLCanvasElement) => {
@@ -547,10 +568,10 @@ export default function App() {
   // ---- render ------------------------------------------------------------------
   const scanning = busy === "scan";
   // Live feed whenever the camera is on, except while the still picture is being labeled.
-  const showVideo = !!stream && !scanning && !still;
+  const showVideo = !!stream && !scanning && (!still || tab === "hands");
   const paper = (
     <div
-      className={`paper ${!image && !stream ? "blank" : ""}`}
+      className={`paper ${!image && !stream ? "blank" : ""} ${tab === "hands" ? "mirror" : ""}`}
       style={{ aspectRatio: aspect, ["--ar" as string]: aspect }}
       onPointerDown={onPointerDown}
       onPointerUp={() => release("pointer")}
@@ -573,7 +594,7 @@ export default function App() {
           <p>{busy === "camera" ? "Starting camera…" : "Allow the camera, or use a photo."}</p>
         </div>
       )}
-      {step === "play" && (
+      {step === "play" && tab !== "hands" && (
         <svg viewBox="0 0 1 1" preserveAspectRatio="none">
           {controls.map((c) => (
             <polygon
@@ -587,7 +608,7 @@ export default function App() {
           ))}
         </svg>
       )}
-      {step === "play" &&
+      {step === "play" && tab !== "hands" &&
         controls.map((c, i) => {
           const [x, y] = center(c.polygon);
           return (
@@ -625,9 +646,9 @@ export default function App() {
         <button className="brand" onClick={restart} aria-label="Start over">
           PaperPilot
         </button>
-        {step === "play" && !scanning && controls.length > 0 && (
+        {((step === "play" && !scanning && controls.length > 0) || tab === "hands") && (
           <nav className="tabs">
-            {(["play", "game", "cad"] as const).map((t) => (
+            {(["play", "game", "cad", "hands"] as const).map((t) => (
               <button
                 key={t}
                 className={tab === t ? "on" : ""}
@@ -637,7 +658,8 @@ export default function App() {
                   setTab(t);
                 }}
               >
-                {t === "play" ? <Music size={16} /> : t === "game" ? <Trophy size={16} /> : <Box size={16} />} {t === "play" ? "Play" : t === "game" ? "Game" : "CAD"}
+                {t === "play" ? <Music size={16} /> : t === "game" ? <Trophy size={16} /> : t === "cad" ? <Box size={16} /> : <Hand size={16} />}{" "}
+                {t === "play" ? "Play" : t === "game" ? "Game" : t === "cad" ? "CAD" : "Hands"}
               </button>
             ))}
           </nav>
@@ -651,7 +673,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={tab === "cad" && step === "play" && !scanning ? "split-cad" : ""}>
+      <main className={(tab === "cad" && step === "play" && !scanning) || tab === "hands" ? "split-cad" : ""}>
         <section className="stage">{paper}</section>
         {tab === "cad" && step === "play" && !scanning && (
           <div className="cad-pane">
@@ -659,8 +681,30 @@ export default function App() {
           </div>
         )}
 
+        {tab === "hands" && (
+          <div className="cad-pane">
+            <CubeStage pose={cubePose} mode={cubeMode} />
+          </div>
+        )}
+
         <aside>
-          {step === "scan" && (
+          {tab === "hands" && (
+            <>
+              <h2>Hands: control a 3D cube</h2>
+              <p className="lead">No paper needed. Only your thumb and index finger are tracked; the two dots show them.</p>
+              <ul className="gestures">
+                <li><b>Pinch and drag</b> with one hand to spin it. Let go and it keeps coasting.</li>
+                <li><b>Pinch with both hands</b> and pull apart sideways to stretch it wide, up and down to stretch it tall, closer together to shrink it.</li>
+                <li><b>Twist</b> both pinched hands to roll it.</li>
+              </ul>
+              {!stream && <p className="hint">Turn on the camera to use your hands.</p>}
+              <button onClick={() => { cubeGestures.current.reset(); cubePose.current = { ...HOME_POSE }; }}>
+                <RotateCcw size={18} /> Reset cube
+              </button>
+              <button className="ghost" onClick={() => setTab("play")}>Back to the instrument</button>
+            </>
+          )}
+          {tab !== "hands" && step === "scan" && (
             <>
               <h1>Take a picture of your drawing</h1>
               <p className="lead">Each shape you draw is an instrument. Write a note (C, F#, Bb) inside a shape to pick its exact note.</p>
@@ -683,11 +727,14 @@ export default function App() {
               <button className="ghost" onClick={demo}>
                 <Play size={18} /> Try without paper
               </button>
+              <button className="ghost" onClick={() => setTab("hands")}>
+                <Hand size={18} /> Control a 3D cube with your hands
+              </button>
               <input ref={fileInput} type="file" accept="image/*" hidden onChange={(e) => void scanPhoto(e.target.files?.[0])} />
             </>
           )}
 
-          {step === "play" && scanning && (
+          {tab !== "hands" && step === "play" && scanning && (
             <>
               <h2>Labeling…</h2>
               <p className="lead">Gemini is finding your keys and drums. Keep the paper and camera still.</p>

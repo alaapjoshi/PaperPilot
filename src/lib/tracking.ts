@@ -24,7 +24,10 @@ export interface HandFrame {
 
 export interface Finger {
   id: string;
+  /** Where the finger pad meets the paper (a little past the tip), for tapping. */
   tip: Point;
+  /** The fingertip landmark itself, for gestures like pinching. */
+  raw: Point;
   palmWidth: number;
 }
 
@@ -352,6 +355,7 @@ export class HandTracker {
             fingers.push({
               id: `${name}:${f}`,
               tip: [tip.x + (tip.x - dip.x) * CONTACT_REACH, tip.y + (tip.y - dip.y) * CONTACT_REACH],
+              raw: [tip.x, tip.y],
               palmWidth: width,
             });
           });

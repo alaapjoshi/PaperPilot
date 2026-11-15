@@ -14,7 +14,7 @@ Built with Aryan Acharya at **Princeton Hacks 2026**. Musical instruments and co
 - Maps each shape type to an instrument: boxes play piano, circles play drums, triangles play marimba, diamonds play bass and stars play sound effects. Any shape can be reassigned.
 - Plays an exact note when one is written inside a shape ("C", "F#", "Bb4"), with a switch to turn that off.
 - Detects fingertip taps on the paper with one, two or ten fingers, tuned for a laptop webcam looking down at a desk.
-- Includes paper games (a light-up song and a one-button runner) and a CAD desk mode where shapes labeled JOY, ZOOM and HOME orbit, zoom and reset a 3D model.
+- Includes paper games (a light-up song and a one-button runner) and two CAD demos: paper shapes labeled JOY, ZOOM and HOME that orbit a 3D model, and a Hands mode where thumb-and-index pinches spin, stretch and roll a floating cube.
 - Shows Gemini spend live in the app, and keeps the API key on the local server so it never reaches the browser.
 
 ## Gallery
@@ -65,7 +65,7 @@ Open http://127.0.0.1:5173 in Chrome and allow the camera.
 1. Draw shapes on paper with a dark pen, for example a row of boxes and a few circles. Write a note such as `F#` inside any shape you want on a specific pitch.
 2. Point the camera at the sheet and click **Take picture**. After about 2 seconds the notes appear over the live feed.
 3. Tap a shape on the paper to play it. You can also click it, or use the keyboard keys shown on each label.
-4. Pick **1**, **2** or **10** fingers, or open the **Game** and **CAD** tabs.
+4. Pick **1**, **2** or **10** fingers, or open the **Game**, **CAD** and **Hands** tabs. Hands mode needs no paper: pinch and drag to spin the cube, pinch with both hands to stretch it.
 
 No webcam? Click **Use a photo instead** and choose `docs/sample/sample-drawing.jpg`, or click **Try without paper**.
 
@@ -80,7 +80,7 @@ npm run preview   # serve the build locally
 ~~~text
 paperpilot/
   src/App.tsx           # the app: picture, play, game and CAD tabs, input routing
-  src/components/       # CAD 3D view and the Paper Dash game
+  src/components/       # 3D views (CAD bracket, hands-controlled cube) and the Paper Dash game
   src/lib/              # tracking, tap detection, outline tracing, audio, synth, geometry (+ tests)
   server/identify.ts    # Gemini scan route and spend tracking, runs inside the Vite server
   public/models/        # MediaPipe hand model and WebAssembly runtime (bundled for offline use)
