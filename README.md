@@ -7,7 +7,7 @@
 ![Project cover](docs/images/cover.png)
 
 ## About
-Built with Aryan Acharya at **Princeton Hacks 2026**. Musical instruments and controllers are expensive and not very portable. PaperPilot turns a sheet of paper into one: you draw boxes, circles and other shapes, take one webcam picture, and Google Gemini identifies each shape and any note written inside it. The app then traces the exact outline you drew, places the notes over the live camera feed, and uses MediaPipe hand tracking to detect when a fingertip taps a shape.
+Built with Aryan Acharya at **Princeton Hacks 2026**. Musical instruments and controllers are expensive and not very portable. PaperPilot turns a sheet of paper into one: you draw boxes, circles and other shapes, take one webcam picture, and Google Gemini identifies each shape and any note written inside it. The app then traces the exact outline you drew, places the notes over the live camera feed, and uses MediaPipe hand tracking to detect when a fingertip taps a shape. It helps beginners learn to play an instrument without buying one, and it lets you control CAD and other 3D software with paper or a pinch instead of extra hardware like a 3D mouse.
 
 ## Features
 - Identifies drawn shapes and handwritten notes from a single webcam picture using Gemini vision with schema-checked JSON output.
