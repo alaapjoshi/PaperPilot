@@ -1,8 +1,26 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 *.tsbuildinfo
-.DS_Store
 artifacts/
+coverage/
 
-.env.local
+# Secrets: keep your own Gemini key in .env.local (see .env.example)
+.env
+.env.*
+!.env.example
+
+# Local Gemini spend log
 .gemini-usage.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
