@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { Box, Camera, Hand, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
+import { Box, Camera, ImageUp, Play, RotateCcw, Trophy, X, LoaderCircle, Music } from "lucide-react";
 import { AudioEngine } from "./lib/audio";
 import { CameraController } from "./lib/camera";
 import { HandTracker, type HandFrame } from "./lib/tracking";
@@ -11,8 +11,9 @@ import { regularize } from "./lib/regularize";
 import { songOrder } from "./lib/song";
 import { DashGame } from "./components/DashGame";
 import { CadStage } from "./components/CadStage";
-import { CubeStage } from "./components/CubeStage";
-import { CubeGestures, HOME_POSE, type CubePose, type GestureMode } from "./lib/gesture";
+import { CubeStage, type CubeViewMode } from "./components/CubeStage";
+import { applyCubePaper, cubeRole, CUBE_HELP, CUBE_ROLES, type CubePaperMode, type CubeRole } from "./lib/cubePaper";
+import { CubeGestures, HOME_POSE, type CubePose } from "./lib/gesture";
 import { axisInShape, levelInShape } from "./lib/stick";
 import type { AiShape } from "../server/identify";
 import { TapDetector } from "./lib/tap";
@@ -130,14 +131,18 @@ export default function App() {
   const [active, setActive] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<Set<string>>(new Set());
   const [tips, setTips] = useState<Point[]>([]);
-  const [tab, setTab] = useState<"play" | "game" | "cad" | "hands">("play");
-  // Hands tab: a floating cube driven by pinch gestures, no paper needed.
+  const [tab, setTab] = useState<"play" | "game" | "cad">("play");
+  const [cadDemo, setCadDemo] = useState<"bracket" | "cube">("bracket");
+  // Cube demo: paper SPIN / ROLL / SIZE / HOME, with pinch still able to grab it.
   const cubeGestures = useRef(new CubeGestures());
   const cubePose = useRef<CubePose>({ ...HOME_POSE });
-  const cubeModeNow = useRef<GestureMode>("idle");
-  const [cubeMode, setCubeMode] = useState<GestureMode>("idle");
+  const cubeModeNow = useRef<CubeViewMode>("idle");
+  const cubeClock = useRef<number | null>(null);
+  const [cubeMode, setCubeMode] = useState<CubeViewMode>("idle");
   const [cadBind, setCadBind] = useState<Partial<Record<CadRole, string>>>({});
   const [cadAssign, setCadAssign] = useState<CadRole | null>(null);
+  const [cubeBind, setCubeBind] = useState<Partial<Record<CubeRole, string>>>({});
+  const [cubeAssign, setCubeAssign] = useState<CubeRole | null>(null);
   const [joy, setJoy] = useState({ x: 0, y: 0 });
   const [zoomLevel, setZoomLevel] = useState<number | null>(null);
   const [homeTick, setHomeTick] = useState(0);
@@ -165,8 +170,8 @@ export default function App() {
   const songAt = useRef(0);
   const joyNow = useRef(joy);
   const zoomNow = useRef(zoomLevel);
-  const live = useRef({ controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign });
-  live.current = { controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign };
+  const live = useRef({ controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign, cadDemo, cubeBind, cubeAssign });
+  live.current = { controls, aspect, game, tab, fingers, gamePick, jumpId, assignJump, dashOn, cadBind, cadAssign, cadDemo, cubeBind, cubeAssign };
 
   useEffect(() => {
     fetch("/api/usage").then((r) => r.json()).then(setUsage).catch(() => setUsage(null));
@@ -207,22 +212,40 @@ export default function App() {
       const c = live.current.controls.find((x) => x.id === id);
       if (!c) return;
       if (held.current.has(slot)) release(slot);
-      const desk = live.current.tab === "cad" && (id === live.current.cadBind.joy || id === live.current.cadBind.zoom);
-      // Sound first, UI after: keeps latency down. Each finger owns its own voice.
+      const now0 = live.current;
       // The joystick and zoom slider are continuous, so a tap there should not also play a note.
-      if (!desk) audio.current.trigger({ controlId: `${id}|${slot}`, phase: "down", value: 1, source, timestampMs: performance.now() }, c, "piano");
+      const desk = now0.tab === "cad" && now0.cadDemo === "bracket" && (id === now0.cadBind.joy || id === now0.cadBind.zoom);
+      // Sound first, UI after: keeps latency down. Each finger owns its own voice.
+      if (!desk) {
+        audio.current.trigger({ controlId: `${id}|${slot}`, phase: "down", value: 1, source, timestampMs: performance.now() }, c, "piano");
+        if (audio.current.needsUnlock) setNotice("Click the page once to turn sound on.");
+      }
       held.current.set(slot, { id, source });
       setActive(new Set([...held.current.values()].map((x) => x.id)));
       const now = live.current;
-      if (now.cadAssign) {
+      if (now.cadAssign && now.cadDemo === "bracket") {
         const role = now.cadAssign;
         setCadBind((b) => ({ ...b, [role]: id }));
         setCadAssign(null);
         setNotice(`${role.toUpperCase()} is this shape.`);
         return;
       }
-      if (now.tab === "cad" && id === now.cadBind.home) {
+      if (now.cubeAssign && now.cadDemo === "cube") {
+        const role = now.cubeAssign;
+        setCubeBind((b) => ({ ...b, [role]: id }));
+        setCubeAssign(null);
+        setNotice(`${role.toUpperCase()} is this shape.`);
+        return;
+      }
+      if (now.tab === "cad" && now.cadDemo === "bracket" && id === now.cadBind.home) {
         setHomeTick((n) => n + 1);
+        return;
+      }
+      if (now.tab === "cad" && now.cadDemo === "cube" && id === now.cubeBind.home) {
+        cubeGestures.current.reset();
+        cubePose.current = { ...HOME_POSE };
+        cubeModeNow.current = "idle";
+        setCubeMode("idle");
         return;
       }
       if (now.assignJump) {
@@ -264,10 +287,24 @@ export default function App() {
     const up = (e: KeyboardEvent) => {
       if (KEYS.includes(e.key.toLowerCase())) release("keyboard");
     };
+    const arrows = (e: KeyboardEvent) => {
+      if (live.current.tab !== "cad" || live.current.cadDemo !== "cube") return;
+      if ((e.target as HTMLElement).matches?.("input,select,textarea")) return;
+      const p = cubeGestures.current.pose;
+      if (e.key === "ArrowLeft") p.yaw -= 0.12;
+      else if (e.key === "ArrowRight") p.yaw += 0.12;
+      else if (e.key === "ArrowUp") p.pitch -= 0.1;
+      else if (e.key === "ArrowDown") p.pitch += 0.1;
+      else return;
+      cubePose.current = { ...p };
+      e.preventDefault();
+    };
     addEventListener("keydown", down);
+    addEventListener("keydown", arrows);
     addEventListener("keyup", up);
     return () => {
       removeEventListener("keydown", down);
+      removeEventListener("keydown", arrows);
       removeEventListener("keyup", up);
     };
   }, [press, release]);
@@ -301,20 +338,6 @@ export default function App() {
   const onHand = useCallback(
     (f: HandFrame) => {
       setTrackError((prev) => (prev ? "" : prev));
-      if (live.current.tab === "hands") {
-        const v = video.current;
-        const ar = v?.videoWidth ? v.videoWidth / v.videoHeight : live.current.aspect;
-        const g = cubeGestures.current;
-        // Mirror like a selfie view, so the cube follows your hand the way you expect.
-        const mirrored = f.fingers.map((x) => ({ ...x, tip: [1 - x.tip[0], x.tip[1]] as Point, raw: [1 - x.raw[0], x.raw[1]] as Point }));
-        cubePose.current = { ...g.update(mirrored, f.timestampMs, ar) };
-        if (g.mode !== cubeModeNow.current) {
-          cubeModeNow.current = g.mode;
-          setCubeMode(g.mode);
-        }
-        setTips(g.points); // only the thumb and index tips this mode uses
-        return;
-      }
       const { controls, aspect, fingers } = live.current;
       // 1 = first index finger, 2 = both index fingers, 10 = every fingertip.
       // Dots always show every detected fingertip; the count only chooses which ones play.
@@ -337,7 +360,7 @@ export default function App() {
           taps.current.delete(id);
           release(`vision:${id}`);
         }
-      if (live.current.tab === "cad") {
+      if (live.current.tab === "cad" && live.current.cadDemo === "bracket") {
         const bind = live.current.cadBind;
         const joyShape = controls.find((c) => c.id === bind.joy);
         const joyFinger = joyShape && use.find((finger) => pointInPolygon(finger.tip, joyShape.polygon));
@@ -354,6 +377,32 @@ export default function App() {
           setZoomLevel(nextZoom);
         }
       }
+      if (live.current.tab === "cad" && live.current.cadDemo === "cube") {
+        const v = video.current;
+        const ar = v?.videoWidth ? v.videoWidth / v.videoHeight : aspect;
+        const g = cubeGestures.current;
+        const prevT = cubeClock.current;
+        cubeClock.current = f.timestampMs;
+        const dt = prevT == null ? 0 : (f.timestampMs - prevT) / 1000;
+        g.update(f.fingers, f.timestampMs, ar);
+        const bind = live.current.cubeBind;
+        const axisOf = (id?: string) => {
+          const shape = id ? controls.find((c) => c.id === id) : undefined;
+          const finger = shape && use.find((tip) => pointInPolygon(tip.tip, shape.polygon));
+          return shape && finger ? axisInShape(finger.tip, shape.polygon) : null;
+        };
+        const spin = axisOf(bind.spin);
+        const roll = axisOf(bind.roll);
+        const size = axisOf(bind.size);
+        applyCubePaper(g.pose, { spin, roll: roll ? { x: roll.x } : null, size }, dt);
+        cubePose.current = { ...g.pose };
+        const paper: CubePaperMode | null = size ? "size" : roll ? "roll" : spin ? "spin" : null;
+        const shown: CubeViewMode = paper ?? g.mode;
+        if (shown !== cubeModeNow.current) {
+          cubeModeNow.current = shown;
+          setCubeMode(shown);
+        }
+      } else cubeClock.current = null;
       setTips(f.fingers.map((x) => x.tip));
       setHover(hovered);
     },
@@ -368,7 +417,8 @@ export default function App() {
   useEffect(() => {
     const v = video.current;
     // Track on the live preview too, so fingertips show before the picture is taken.
-    if (busy === "scan" || (still && tab !== "hands") || !stream || !trackerReady || !v) return;
+    const cubeLive = tab === "cad" && cadDemo === "cube";
+    if (busy === "scan" || (still && !cubeLive) || !stream || !trackerReady || !v) return;
     taps.current.clear();
     try {
       tracker.current.start(v, onHand, (message) => setTrackError(message));
@@ -382,7 +432,7 @@ export default function App() {
       setTips([]);
       setHover(new Set());
     };
-  }, [busy, still, tab, stream, trackerReady, onHand, release]);
+  }, [busy, still, tab, cadDemo, stream, trackerReady, onHand, release]);
 
   // ---- scanning ------------------------------------------------------------
   const scan = async (canvas: HTMLCanvasElement) => {
@@ -548,6 +598,15 @@ export default function App() {
       }
       return next;
     });
+    setCubeBind((prev) => {
+      const next = { ...prev };
+      for (const role of CUBE_ROLES) {
+        if (next[role] && !controls.some((c) => c.id === next[role])) delete next[role];
+        const found = controls.find((c) => cubeRole(c.label ?? "") === role);
+        if (found) next[role] = found.id;
+      }
+      return next;
+    });
   }, [controls]);
 
   const restart = () => {
@@ -568,10 +627,12 @@ export default function App() {
   // ---- render ------------------------------------------------------------------
   const scanning = busy === "scan";
   // Live feed whenever the camera is on, except while the still picture is being labeled.
-  const showVideo = !!stream && !scanning && (!still || tab === "hands");
+  const cubeLive = tab === "cad" && cadDemo === "cube";
+  const showVideo = !!stream && !scanning && (!still || cubeLive);
+  const boundIds = (tab === "cad" ? Object.values(cadDemo === "cube" ? cubeBind : cadBind) : []).filter((id): id is string => !!id);
   const paper = (
     <div
-      className={`paper ${!image && !stream ? "blank" : ""} ${tab === "hands" ? "mirror" : ""}`}
+      className={`paper ${!image && !stream ? "blank" : ""}`}
       style={{ aspectRatio: aspect, ["--ar" as string]: aspect }}
       onPointerDown={onPointerDown}
       onPointerUp={() => release("pointer")}
@@ -594,13 +655,13 @@ export default function App() {
           <p>{busy === "camera" ? "Starting camera…" : "Allow the camera, or use a photo."}</p>
         </div>
       )}
-      {step === "play" && tab !== "hands" && (
+      {step === "play" && (
         <svg viewBox="0 0 1 1" preserveAspectRatio="none">
           {controls.map((c) => (
             <polygon
               key={c.id}
               points={c.polygon.map((p) => p.join(",")).join(" ")}
-              className={[`v-${voiceOf(c)}`, active.has(c.id) && "on", ((game.on && game.target === c.id) || (gamePick === "dash" && c.id === jumpId) || (tab === "cad" && Object.values(cadBind).includes(c.id))) && "target", hover.has(c.id) && "hover"]
+              className={[`v-${voiceOf(c)}`, active.has(c.id) && "on", ((game.on && game.target === c.id) || (gamePick === "dash" && c.id === jumpId) || boundIds.includes(c.id)) && "target", hover.has(c.id) && "hover"]
                 .filter(Boolean)
                 .join(" ")}
               vectorEffect="non-scaling-stroke"
@@ -608,16 +669,22 @@ export default function App() {
           ))}
         </svg>
       )}
-      {step === "play" && tab !== "hands" &&
+      {step === "play" &&
         controls.map((c, i) => {
           const [x, y] = center(c.polygon);
+          const roleName =
+            tab !== "cad"
+              ? null
+              : cadDemo === "cube"
+                ? CUBE_ROLES.find((role) => cubeBind[role] === c.id)?.toUpperCase()
+                : CAD_ROLES.find((role) => cadBind[role] === c.id)?.toUpperCase();
           return (
             <span
               key={c.id}
               className={`tag v-${voiceOf(c)} ${active.has(c.id) ? "on" : ""}`}
               style={{ left: `${x * 100}%`, top: `${y * 100}%` }}
             >
-              {tab === "cad" ? (CAD_ROLES.find((role) => cadBind[role] === c.id)?.toUpperCase() ?? label(c.action)) : label(c.action)}
+              {roleName ?? label(c.action)}
               {KEYS[i] && <kbd>{KEYS[i].toUpperCase()}</kbd>}
             </span>
           );
@@ -646,20 +713,21 @@ export default function App() {
         <button className="brand" onClick={restart} aria-label="Start over">
           PaperPilot
         </button>
-        {((step === "play" && !scanning && controls.length > 0) || tab === "hands") && (
+        {step === "play" && !scanning && controls.length > 0 && (
           <nav className="tabs">
-            {(["play", "game", "cad", "hands"] as const).map((t) => (
+            {(["play", "game", "cad"] as const).map((t) => (
               <button
                 key={t}
                 className={tab === t ? "on" : ""}
                 onClick={() => {
                   stopGames();
                   setCadAssign(null);
+                  setCubeAssign(null);
                   setTab(t);
                 }}
               >
-                {t === "play" ? <Music size={16} /> : t === "game" ? <Trophy size={16} /> : t === "cad" ? <Box size={16} /> : <Hand size={16} />}{" "}
-                {t === "play" ? "Play" : t === "game" ? "Game" : t === "cad" ? "CAD" : "Hands"}
+                {t === "play" ? <Music size={16} /> : t === "game" ? <Trophy size={16} /> : <Box size={16} />}{" "}
+                {t === "play" ? "Play" : t === "game" ? "Game" : "CAD"}
               </button>
             ))}
           </nav>
@@ -673,38 +741,20 @@ export default function App() {
         </div>
       </header>
 
-      <main className={(tab === "cad" && step === "play" && !scanning) || tab === "hands" ? "split-cad" : ""}>
+      <main className={tab === "cad" && step === "play" && !scanning ? "split-cad" : ""}>
         <section className="stage">{paper}</section>
         {tab === "cad" && step === "play" && !scanning && (
           <div className="cad-pane">
-            <CadStage joy={joy} zoom={zoomLevel} homeTick={homeTick} section={sectionOn} />
-          </div>
-        )}
-
-        {tab === "hands" && (
-          <div className="cad-pane">
-            <CubeStage pose={cubePose} mode={cubeMode} />
+            {cadDemo === "cube" ? (
+              <CubeStage pose={cubePose} mode={cubeMode} />
+            ) : (
+              <CadStage joy={joy} zoom={zoomLevel} homeTick={homeTick} section={sectionOn} />
+            )}
           </div>
         )}
 
         <aside>
-          {tab === "hands" && (
-            <>
-              <h2>Hands: control a 3D cube</h2>
-              <p className="lead">No paper needed. Only your thumb and index finger are tracked; the two dots show them.</p>
-              <ul className="gestures">
-                <li><b>Pinch and drag</b> with one hand to spin it. Let go and it keeps coasting.</li>
-                <li><b>Pinch with both hands</b> and pull apart sideways to stretch it wide, up and down to stretch it tall, closer together to shrink it.</li>
-                <li><b>Twist</b> both pinched hands to roll it.</li>
-              </ul>
-              {!stream && <p className="hint">Turn on the camera to use your hands.</p>}
-              <button onClick={() => { cubeGestures.current.reset(); cubePose.current = { ...HOME_POSE }; }}>
-                <RotateCcw size={18} /> Reset cube
-              </button>
-              <button className="ghost" onClick={() => setTab("play")}>Back to the instrument</button>
-            </>
-          )}
-          {tab !== "hands" && step === "scan" && (
+          {step === "scan" && (
             <>
               <h1>Take a picture of your drawing</h1>
               <p className="lead">Each shape you draw is an instrument. Write a note (C, F#, Bb) inside a shape to pick its exact note.</p>
@@ -727,14 +777,11 @@ export default function App() {
               <button className="ghost" onClick={demo}>
                 <Play size={18} /> Try without paper
               </button>
-              <button className="ghost" onClick={() => setTab("hands")}>
-                <Hand size={18} /> Control a 3D cube with your hands
-              </button>
               <input ref={fileInput} type="file" accept="image/*" hidden onChange={(e) => void scanPhoto(e.target.files?.[0])} />
             </>
           )}
 
-          {tab !== "hands" && step === "play" && scanning && (
+          {step === "play" && scanning && (
             <>
               <h2>Labeling…</h2>
               <p className="lead">Gemini is finding your keys and drums. Keep the paper and camera still.</p>
@@ -820,21 +867,56 @@ export default function App() {
 
           {step === "play" && !scanning && tab === "cad" && (
             <>
-              <h2>Desk controls</h2>
-              <p className="lead">Extra hands for a CAD program. Draw three shapes and write JOY, ZOOM, and HOME. The joystick orbits the bracket. Slide ZOOM. Tap HOME to reset. Arrow keys do the same orbit.</p>
-              <ol className="steps-list">
-                {CAD_ROLES.map((role) => (
-                  <li key={role} className={cadBind[role] ? "done" : ""}>{CAD_HELP[role]}{cadBind[role] ? " · ready" : ""}</li>
-                ))}
-              </ol>
-              {CAD_ROLES.map((role) => (
-                <button key={role} className={cadAssign === role ? "primary" : ""} onClick={() => setCadAssign(role)}>
-                  {cadAssign === role ? `Tap the ${role.toUpperCase()} shape…` : cadBind[role] ? `Reassign ${role.toUpperCase()}` : `Tap a shape for ${role.toUpperCase()}`}
+              <div className="choice" role="tablist" aria-label="CAD demonstrations">
+                <button className={cadDemo === "bracket" ? "on" : ""} onClick={() => { setCadDemo("bracket"); setCadAssign(null); setCubeAssign(null); }}>
+                  Bracket <small>JOY, ZOOM, HOME</small>
                 </button>
-              ))}
-              <button className={sectionOn ? "primary" : ""} onClick={() => setSectionOn((v) => !v)}>
-                {sectionOn ? "Section on" : "Section view"}
-              </button>
+                <button className={cadDemo === "cube" ? "on" : ""} onClick={() => { setCadDemo("cube"); setCadAssign(null); setCubeAssign(null); }}>
+                  Cube <small>SPIN, ROLL, SIZE</small>
+                </button>
+              </div>
+              {cadDemo === "bracket" ? (
+                <>
+                  <h2>Desk controls</h2>
+                  <p className="lead">Extra hands for a CAD program. Draw three shapes and write JOY, ZOOM, and HOME. The joystick orbits the bracket. Slide ZOOM. Tap HOME to reset. Arrow keys do the same orbit.</p>
+                  <ol className="steps-list">
+                    {CAD_ROLES.map((role) => (
+                      <li key={role} className={cadBind[role] ? "done" : ""}>{CAD_HELP[role]}{cadBind[role] ? " · ready" : ""}</li>
+                    ))}
+                  </ol>
+                  {CAD_ROLES.map((role) => (
+                    <button key={role} className={cadAssign === role ? "primary" : ""} onClick={() => setCadAssign(role)}>
+                      {cadAssign === role ? `Tap the ${role.toUpperCase()} shape…` : cadBind[role] ? `Reassign ${role.toUpperCase()}` : `Tap a shape for ${role.toUpperCase()}`}
+                    </button>
+                  ))}
+                  <button className={sectionOn ? "primary" : ""} onClick={() => setSectionOn((v) => !v)}>
+                    {sectionOn ? "Section on" : "Section view"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h2>Cube</h2>
+                  <p className="lead">Draw four shapes and write SPIN, ROLL, SIZE, and HOME. Push inside SPIN to turn the cube. Slide inside ROLL to roll it. Inside SIZE, right is wider, left is narrower, up is taller, and down is shorter. Tap HOME to reset. Arrow keys turn it too.</p>
+                  <ol className="steps-list">
+                    {CUBE_ROLES.map((role) => (
+                      <li key={role} className={cubeBind[role] ? "done" : ""}>{CUBE_HELP[role]}{cubeBind[role] ? " · ready" : ""}</li>
+                    ))}
+                  </ol>
+                  {CUBE_ROLES.map((role) => (
+                    <button key={role} className={cubeAssign === role ? "primary" : ""} onClick={() => setCubeAssign(role)}>
+                      {cubeAssign === role ? `Tap the ${role.toUpperCase()} shape…` : cubeBind[role] ? `Reassign ${role.toUpperCase()}` : `Tap a shape for ${role.toUpperCase()}`}
+                    </button>
+                  ))}
+                  <ul className="gestures">
+                    <li><b>Pinch and drag</b> with one hand to spin it. Let go and it keeps coasting.</li>
+                    <li><b>Pinch with both hands</b> to stretch it, and twist them to roll it.</li>
+                  </ul>
+                  {!stream && <p className="hint">Turn on the camera to use the paper or a pinch. Arrow keys turn the cube either way.</p>}
+                  <button onClick={() => { cubeGestures.current.reset(); cubePose.current = { ...HOME_POSE }; cubeModeNow.current = "idle"; setCubeMode("idle"); }}>
+                    <RotateCcw size={18} /> Reset cube
+                  </button>
+                </>
+              )}
             </>
           )}
 

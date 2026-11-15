@@ -126,6 +126,8 @@ export class AudioEngine {
   private preloadPromise: Promise<void> | null = null;
   /** Downs that arrived before the browser allowed playback. */
   private pending = new Map<string, { event: ControlEvent; control: PaperControl; mode: Mode; octave: number; release: boolean }>();
+  /** A note was queued because this page has not been allowed to play audio yet. */
+  needsUnlock = false;
 
   /** Fetch samples without creating an AudioContext, so autoplay rules are not tripped on page load. */
   preload(): Promise<void> {
@@ -285,15 +287,17 @@ export class AudioEngine {
         /* the click handler surfaces the error */
       }
     }
-    if (this.context && this.context.state !== "running" && this.gesture()) {
+    // A context that already started can resume after a camera or tab interruption.
+    // Creating the first one still has to happen inside a click or key press.
+    if (this.context && this.context.state !== "running") {
       const context = this.context;
       void context.resume().then(() => {
         if (context.state === "running") this.flush();
-      });
+      }).catch(() => {});
     }
     if (!this.loaded) void this.ready().catch(() => {});
     if (!this.canPlay()) {
-      if (event.phase === "down")
+      if (event.phase === "down") {
         this.pending.set(owner, {
           event,
           control,
@@ -301,12 +305,14 @@ export class AudioEngine {
           octave,
           release: this.pending.get(owner)?.release ?? false,
         });
-      else if (event.phase === "up") {
+        this.needsUnlock = !this.context && !this.gesture();
+      } else if (event.phase === "up") {
         const queued = this.pending.get(owner);
         if (queued) queued.release = true;
       }
       return;
     }
+    this.needsUnlock = false;
     if (event.phase === "up") {
       const pedal = this.sustain && (mode === "piano" || mode === "chords");
       for (const id of this.ownership.release(owner, pedal)) {

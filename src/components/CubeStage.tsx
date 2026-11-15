@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
+import type { CubePaperMode } from "../lib/cubePaper";
 import type { CubePose, GestureMode } from "../lib/gesture";
+
+export type CubeViewMode = GestureMode | CubePaperMode;
 
 type Vec = [number, number, number];
 const CORNERS: Vec[] = [
@@ -17,7 +20,7 @@ const FACES: [number[], string][] = [
 ];
 
 /** A floating cube drawn on a canvas; `pose` is read every frame so hand updates don't re-render React. */
-export function CubeStage({ pose, mode }: { pose: { current: CubePose }; mode: GestureMode }) {
+export function CubeStage({ pose, mode }: { pose: { current: CubePose }; mode: CubeViewMode }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const el = canvas.current;
@@ -87,7 +90,14 @@ export function CubeStage({ pose, mode }: { pose: { current: CubePose }; mode: G
     return () => cancelAnimationFrame(raf);
   }, [pose]);
 
-  const label = { idle: "Pinch to grab", rotate: "Spinning", stretch: "Stretching" }[mode];
+  const label = {
+    idle: "Pinch, or use SPIN",
+    rotate: "Spinning",
+    stretch: "Stretching",
+    spin: "SPIN",
+    roll: "ROLL",
+    size: "SIZE",
+  }[mode];
   return (
     <div className="cube-view">
       <canvas ref={canvas} aria-label="A floating 3D cube you control with hand gestures" />
